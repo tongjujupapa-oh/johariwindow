@@ -1,0 +1,1102 @@
+<!DOCTYPE html>
+<!--
+  Johari Live — Standalone
+  v1.1
+  - 코치 리포트 화면 순서 변경: "참여자별 결과" 목록을 맨 위로 이동 (Top 10
+    형용사, 팀 공통 강점보다 먼저 보이도록).
+
+  v1.0 (정식 버전 — 이후 수정은 0.1씩 버전업)
+  - v0.1~v0.10에서 다진 안정화 버전에 버전 번호만 1.0으로 승격. 기능 변경 없음.
+
+  v0.10
+  - 버그 수정: "maximum call stack size exceeded" 오류. v0.9에서 넣은
+    JSON.parse(JSON.stringify()) 기반 정리가 순환 참조/과도한 중첩에서 스택을
+    넘길 수 있었던 것으로 보여, 방문한 객체를 기억해 순환을 안전하게 끊는
+    수동 정리 함수(stripUndefinedSafe)로 교체. 순환 참조를 실제로 만들어
+    스택 오버플로 없이 처리되는 것까지 확인.
+  - 코치 리포트 화면에 "참여자별 결과" 목록 추가 — 이름을 누르면 팝업으로
+    그 사람의 조하리 창(4분면 + 색 구분 단어)을 바로 볼 수 있음.
+  - 세션 종료 처리 속도 개선: 참여자/자기선택/타인선택 조회와 결과/리포트
+    저장을 순차 대기 대신 병렬로 처리.
+
+  v0.9
+  - crossorigin 속성으로 오류 메시지 은폐 방지, Firebase undefined 저장 방어,
+    저장 성공 여부 확인, 타인선택 대기 조회 병렬화
+  v0.8
+  - 타인 선택 완료 후 결과가 안 보이던 버그 수정 (Firebase 빈 배열 삭제 특성 대응)
+  v0.7
+  - "firebase is not defined" 오류 수정 (CDN 교체)
+  v0.6 (Firebase 설정 완료된 배포용)
+  - 모바일 결과 안 보임 대응, 완료 버튼 중복 클릭 경합 제거, 결과 화면 2x2
+    통합 창 + 색 점 구분, 링크 생성/복사 팝업 추가
+
+  v0.5
+  - Netlify 등 정적 호스팅 배포 지원: window.storage(Claude 아티팩트 전용 API)를
+    Firebase Realtime Database로 교체했습니다. window.storage는 Claude.ai 안에서만
+    동작해서, 이 파일을 그대로 Netlify에 올리면 저장/조회가 전부 실패했습니다.
+
+  ▶ 배포 전 꼭 해야 할 것 (아래 firebaseConfig 자리표시자를 실제 값으로 교체):
+    1. https://console.firebase.google.com 에서 새 프로젝트 생성 (무료)
+    2. 왼쪽 메뉴 Build > Realtime Database > "데이터베이스 만들기"
+       - 위치는 asia-southeast1(싱가포르) 등 가까운 곳 선택
+       - 보안 규칙은 "테스트 모드"로 시작 (30일 후 자동 잠김 — 아래 3번으로 직접 열어두세요)
+    3. Realtime Database > 규칙(Rules) 탭에서 아래로 교체 (로그인 없이 코드만으로
+       쓰는 앱이라 읽기/쓰기를 열어둡니다 — 참여자 수/QR 코드 외 민감정보는 다루지 않음):
+       { "rules": { ".read": true, ".write": true } }
+    4. 프로젝트 설정(⚙) > 일반 > 내 앱 > 웹 앱 추가 (</> 아이콘) > "SDK 설정 및 구성"에서
+       나오는 firebaseConfig 객체를 복사해서, 아래 <script> 안의 firebaseConfig를
+       통째로 교체
+    5. 이 HTML 파일을 Netlify에 그대로 업로드(드래그 앤 드롭)하면 끝
+
+  v0.4
+  - 대규모 동시 참여 대비 데이터 계층 재설계 (참여자별/평가자별 키로 경합 제거)
+  v0.3 / v0.2 / v0.1
+  - 전역 오류 안전장치, 자체 뒤로가기 스택, 폴링 누적 버그 수정, QR 중복 렌더 수정
+-->
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>Johari Live — Standalone v1.1</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/12.15.0/firebase-app-compat.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/12.15.0/firebase-database-compat.min.js" crossorigin="anonymous"></script>
+<style>
+  :root{
+    --navy:#1C2541; --navy-light:#2A3A63; --parchment:#FAF7EF; --gold:#C9A05C;
+    --ink:#20232B; --muted:#6B7280; --line:#E4DCC8; --danger:#C1554A;
+    --open:#7FA88F; --hidden:#C99A5B; --blind:#6E8FB0; --unknown:#9B8AA8;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:'Inter',sans-serif;background:var(--parchment);color:var(--ink);min-height:100vh;}
+  h1,h2,h3,button,.code-badge{font-family:'Space Grotesk',sans-serif;}
+  #app{min-height:100vh;display:flex;flex-direction:column;}
+
+  .wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:24px;}
+  .card{max-width:440px;width:100%;}
+  .brand{font-size:14px;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);font-weight:600;margin-bottom:8px;text-align:center;}
+  .title{font-size:27px;line-height:1.35;margin:0 0 10px;color:var(--navy);text-align:center;}
+  .desc{color:var(--muted);font-size:14px;line-height:1.6;margin:0 0 28px;text-align:center;}
+  .btn{border:none;border-radius:12px;padding:15px 20px;font-size:15.5px;font-weight:600;cursor:pointer;font-family:'Space Grotesk',sans-serif;transition:transform .1s;}
+  .btn:active{transform:scale(.98);}
+  .btn:disabled{opacity:.45;cursor:not-allowed;}
+  .btn-primary{background:var(--navy);color:#fff;width:100%;}
+  .btn-secondary{background:#fff;color:var(--navy);border:1.5px solid var(--navy);width:100%;}
+  .btn-gold{background:var(--gold);color:var(--navy);}
+  .btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--line);}
+  .stack{display:flex;flex-direction:column;gap:10px;}
+  .fineprint{margin-top:22px;font-size:12px;color:var(--muted);line-height:1.6;text-align:center;}
+
+  .form-card{max-width:400px;width:100%;background:#fff;border:1px solid var(--line);border-radius:16px;padding:28px 26px;}
+  .form-card h2{margin:0 0 4px;font-size:19px;color:var(--navy);}
+  .form-card .sub{color:var(--muted);font-size:13px;margin:0 0 18px;}
+  .back-link{background:none;border:none;color:var(--muted);font-size:13px;cursor:pointer;padding:0;margin-bottom:14px;text-decoration:underline;display:inline-block;}
+  label{display:block;font-size:12.5px;font-weight:600;color:var(--navy);margin:14px 0 6px;}
+  input[type=text]{width:100%;padding:12px 13px;border-radius:9px;border:1.5px solid var(--line);font-size:15px;font-family:'Inter',sans-serif;background:var(--parchment);}
+  input[type=text]:focus{outline:none;border-color:var(--gold);}
+  .code-input{letter-spacing:.3em;text-align:center;font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:700;}
+  .radio-row{display:flex;gap:16px;font-size:13.5px;}
+  .radio-row label{display:flex;align-items:center;gap:6px;margin:0;font-weight:500;color:var(--ink);}
+  .error-text{color:var(--danger);font-size:12.5px;margin-top:10px;}
+  .prefill-badge{background:var(--gold);color:var(--navy);padding:7px 15px;border-radius:8px;font-weight:700;letter-spacing:.15em;font-size:17px;width:fit-content;margin:0 auto 4px;font-family:'Space Grotesk',sans-serif;}
+
+  .backbar{max-width:900px;margin:0 auto;width:100%;padding:14px 18px 0;}
+
+  .topbar{background:var(--navy);color:#fff;padding:14px 18px;}
+  .topbar-row{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;max-width:900px;margin:0 auto;}
+  .code-badge{background:var(--gold);color:var(--navy);padding:5px 13px;border-radius:8px;font-weight:700;letter-spacing:.15em;font-size:14px;}
+  .muted-white{font-size:11.5px;color:#c8cfe0;}
+  .qr-wrap{display:flex;align-items:center;gap:9px;background:#fff;border-radius:10px;padding:7px 10px;}
+  .qr-wrap #qr-code{width:76px;height:76px;line-height:0;}
+  .qr-wrap .qr-caption{color:var(--navy);font-size:10.5px;line-height:1.35;max-width:110px;}
+  .link-btn{background:#fff;border:none;border-radius:10px;padding:9px 14px;font-size:12.5px;font-weight:600;
+    color:var(--navy);cursor:pointer;font-family:'Space Grotesk',sans-serif;white-space:nowrap;}
+
+  .modal-overlay{position:fixed;inset:0;background:rgba(28,37,65,.55);display:flex;align-items:center;justify-content:center;z-index:60;padding:20px;}
+  .modal-card{background:#fff;border-radius:16px;padding:22px;max-width:420px;width:100%;position:relative;}
+  .modal-close{position:absolute;top:14px;right:16px;background:none;border:none;font-size:20px;color:var(--muted);cursor:pointer;}
+  .link-box{display:flex;gap:8px;margin-top:14px;}
+  .link-box input{flex:1;padding:11px 12px;border-radius:9px;border:1.5px solid var(--line);font-size:13px;background:var(--parchment);color:var(--ink);}
+  .link{background:none;border:none;color:#c8cfe0;font-size:12px;cursor:pointer;text-decoration:underline;}
+  .link-onwhite{background:none;border:none;color:var(--muted);font-size:13px;cursor:pointer;text-decoration:underline;padding:0;}
+
+  .content{max-width:900px;margin:0 auto;width:100%;padding:18px;}
+  .panel{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:14px;}
+  .chip-list{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px;}
+  .pchip{font-size:12px;background:var(--parchment);border:1px solid var(--line);border-radius:20px;padding:5px 12px;}
+
+  .progress-label{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:4px;}
+  .progress-track{height:8px;width:100%;border-radius:20px;background:var(--line);overflow:hidden;margin-bottom:14px;}
+  .progress-fill{height:100%;border-radius:20px;background:var(--gold);}
+
+  .banner{background:var(--navy);color:#fff;border-radius:14px;padding:18px;margin-bottom:16px;}
+  .banner .tag{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--gold);font-weight:700;}
+  .banner .main{margin-top:4px;font-weight:600;font-size:15.5px;}
+  .banner .sub{font-size:12.5px;color:#c8cfe0;margin-top:3px;}
+
+  .adj-search{width:100%;padding:11px 13px;border-radius:9px;border:1.5px solid var(--line);font-size:14px;background:#fff;}
+  .adj-search:focus{outline:none;border-color:var(--gold);}
+  .adj-grid{margin-top:10px;display:grid;grid-template-columns:repeat(4,1fr);gap:7px;}
+  @media(min-width:520px){.adj-grid{grid-template-columns:repeat(6,1fr);}}
+  .adj-chip{border-radius:8px;border:1.5px solid var(--line);background:#fff;padding:9px 4px;font-size:13px;cursor:pointer;min-height:44px;}
+  .adj-chip.selected{background:var(--navy);color:#fff;border-color:var(--navy);}
+  .adj-chip.disabled{background:#F3F1E9;color:var(--muted);cursor:not-allowed;}
+  .empty-note{text-align:center;color:var(--muted);font-size:13px;margin-top:16px;grid-column:1/-1;}
+
+  .quad-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;}
+  .quad-cell{border-radius:12px;border-left:4px solid;padding:13px;}
+  .quad-head{display:flex;justify-content:space-between;align-items:baseline;}
+  .quad-title{font-size:13px;font-weight:700;color:var(--navy);}
+  .quad-pct{font-size:15px;font-weight:700;color:var(--navy);font-family:'Space Grotesk',sans-serif;}
+  .quad-desc{font-size:10.5px;color:var(--muted);margin:1px 0 9px;}
+  .quad-open{background:rgba(127,168,143,.12);border-color:var(--open);}
+  .quad-hidden{background:rgba(201,154,91,.12);border-color:var(--hidden);}
+  .quad-blind{background:rgba(110,143,176,.12);border-color:var(--blind);}
+  .quad-unknown{background:rgba(155,138,168,.12);border-color:var(--unknown);}
+  .quad-words{display:flex;flex-wrap:wrap;gap:6px;max-height:180px;overflow-y:auto;}
+  .word-chip{font-size:12px;border-radius:20px;padding:4px 9px;background:#fff;border:1.5px solid var(--line);
+    display:inline-flex;align-items:center;gap:5px;white-space:nowrap;}
+  .dot{width:7px;height:7px;border-radius:50%;flex:none;}
+  .dot-group{display:inline-flex;gap:2px;}
+  .legend{display:flex;gap:16px;justify-content:center;font-size:11.5px;color:var(--muted);margin-bottom:16px;}
+  .legend-item{display:flex;align-items:center;gap:5px;}
+
+  .center-msg{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px;gap:14px;}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+/* ---------------- 데이터: 조하리 표준 형용사 56개 ---------------- */
+const ADJECTIVES = [
+  {id:1,ko:'유능한',en:'able'},{id:2,ko:'수용적인',en:'accepting'},{id:3,ko:'적응력 있는',en:'adaptable'},
+  {id:4,ko:'대담한',en:'bold'},{id:5,ko:'용감한',en:'brave'},{id:6,ko:'차분한',en:'calm'},
+  {id:7,ko:'배려심 있는',en:'caring'},{id:8,ko:'명랑한',en:'cheerful'},{id:9,ko:'영리한',en:'clever'},
+  {id:10,ko:'복합적인',en:'complex'},{id:11,ko:'자신감 있는',en:'confident'},{id:12,ko:'믿음직한',en:'dependable'},
+  {id:13,ko:'품위 있는',en:'dignified'},{id:14,ko:'공감적인',en:'empathetic'},{id:15,ko:'활기찬',en:'energetic'},
+  {id:16,ko:'외향적인',en:'extroverted'},{id:17,ko:'다정한',en:'friendly'},{id:18,ko:'베푸는',en:'giving'},
+  {id:19,ko:'행복한',en:'happy'},{id:20,ko:'도움을 주는',en:'helpful'},{id:21,ko:'이상적인',en:'idealistic'},
+  {id:22,ko:'독립적인',en:'independent'},{id:23,ko:'창의적인',en:'ingenious'},{id:24,ko:'지적인',en:'intelligent'},
+  {id:25,ko:'내향적인',en:'introverted'},{id:26,ko:'친절한',en:'kind'},{id:27,ko:'박식한',en:'knowledgeable'},
+  {id:28,ko:'논리적인',en:'logical'},{id:29,ko:'사랑이 많은',en:'loving'},{id:30,ko:'성숙한',en:'mature'},
+  {id:31,ko:'겸손한',en:'modest'},{id:32,ko:'불안해하는',en:'nervous'},{id:33,ko:'관찰력 있는',en:'observant'},
+  {id:34,ko:'체계적인',en:'organized'},{id:35,ko:'인내심 있는',en:'patient'},{id:36,ko:'영향력 있는',en:'powerful'},
+  {id:37,ko:'자부심 있는',en:'proud'},{id:38,ko:'조용한',en:'quiet'},{id:39,ko:'성찰적인',en:'reflective'},
+  {id:40,ko:'여유로운',en:'relaxed'},{id:41,ko:'신앙심 있는',en:'religious'},{id:42,ko:'반응이 빠른',en:'responsive'},
+  {id:43,ko:'탐구하는',en:'searching'},{id:44,ko:'자기주장이 강한',en:'self-assertive'},{id:45,ko:'자의식이 강한',en:'self-conscious'},
+  {id:46,ko:'분별력 있는',en:'sensible'},{id:47,ko:'감성적인',en:'sentimental'},{id:48,ko:'수줍은',en:'shy'},
+  {id:49,ko:'장난기 있는',en:'silly'},{id:50,ko:'즉흥적인',en:'spontaneous'},{id:51,ko:'동정심 있는',en:'sympathetic'},
+  {id:52,ko:'긴장한',en:'tense'},{id:53,ko:'신뢰할 수 있는',en:'trustworthy'},{id:54,ko:'따뜻한',en:'warm'},
+  {id:55,ko:'지혜로운',en:'wise'},{id:56,ko:'재치있는',en:'witty'},
+];
+const ADJ_BY_ID = Object.fromEntries(ADJECTIVES.map(a=>[a.id,a]));
+const ALL_IDS = ADJECTIVES.map(a=>a.id);
+
+/* ---------------- 상태 ---------------- */
+let state = {
+  screen:'home', code:null, session:null,
+  participantId:null, nickname:null, peerTargetId:null,
+  error:'', prefillCode:null,
+  showLinkPopup:false,
+  reportDetailId:null,
+};
+let pollTimer = null;
+const app = document.getElementById('app');
+
+function esc(s){ const d=document.createElement('div'); d.textContent=s??''; return d.innerHTML; }
+function genCode(){ return String(Math.floor(1000+Math.random()*9000)); }
+function stopPolling(){ if(pollTimer){ clearInterval(pollTimer); pollTimer=null; } }
+function getQueryCode(){
+  const c = new URLSearchParams(window.location.search).get('code');
+  return c && /^\d{4}$/.test(c) ? c : null;
+}
+
+/* ---------------- 뒤로가기 내비게이션 ----------------
+   브라우저 History API(pushState 등)는 이 아티팩트 샌드박스 환경에서 예외를 던질 수
+   있어(v0.1 버그 원인) 신뢰하지 않습니다. 자체 in-memory 스택을 기본 메커니즘으로
+   쓰고, History API는 되면 좋고 안 되도 상관없는 best-effort로만 시도합니다.
+
+   goto(): 사용자가 버튼을 눌러 "앞으로" 이동 -> 이전 상태를 스택에 저장
+   redirectTo(): 폴링 등 시스템이 자동으로 화면을 바꾸는 경우 -> 스택에 안 쌓음
+   goBack(): 앱 내 "← 뒤로" 버튼과 하드웨어 뒤로가기(popstate)가 공통으로 호출
+*/
+let navStack = [];
+function snapshot(){ return JSON.parse(JSON.stringify(state)); }
+function safeHistoryCall(fn){ try{ fn(); }catch(e){ /* History API 미지원 환경 - 무시 */ } }
+
+function goto(patch){
+  navStack.push(snapshot());
+  state = { ...state, ...patch };
+  safeHistoryCall(()=> history.pushState(null, ''));
+  render();
+}
+function redirectTo(patch){
+  state = { ...state, ...patch };
+  safeHistoryCall(()=> history.replaceState(null, ''));
+  render();
+}
+function goBack(){
+  state = navStack.length ? navStack.pop() : { screen:'home' };
+  render();
+}
+window.addEventListener('popstate', goBack);
+function backBar(){
+  return `<div class="backbar"><button class="back-link" id="btn-back">← 뒤로</button></div>`;
+}
+function bindBackBar(){
+  const el = document.getElementById('btn-back');
+  if(el) el.onclick = goBack;
+}
+
+/* ---------------- Firebase 설정 (여기를 본인 프로젝트 값으로 교체) ---------------- */
+const firebaseConfig = {
+  apiKey: "AIzaSyBXFqyb2kSXH71O_f7YplMKo1qTwlmargg",
+  authDomain: "johariwindow-5a303.firebaseapp.com",
+  databaseURL: "https://johariwindow-5a303-default-rtdb.firebaseio.com",
+  projectId: "johariwindow-5a303",
+  storageBucket: "johariwindow-5a303.firebasestorage.app",
+  messagingSenderId: "335518901756",
+  appId: "1:335518901756:web:ec992727ad70c85312be79",
+  measurementId: "G-9GLEN91WBH"
+};
+const FIREBASE_CONFIGURED = !String(firebaseConfig.apiKey).startsWith('YOUR_');
+const FIREBASE_SDK_LOADED = typeof firebase !== 'undefined';
+let db = null;
+if(FIREBASE_CONFIGURED && FIREBASE_SDK_LOADED){
+  try{
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.database();
+  }catch(e){ console.error('Firebase 초기화 실패 - firebaseConfig 값을 확인하세요.', e); }
+}else if(FIREBASE_CONFIGURED && !FIREBASE_SDK_LOADED){
+  console.error('Firebase SDK 스크립트가 로드되지 않았습니다. CDN 주소나 네트워크 상태를 확인하세요.');
+}
+
+/* ---------------- 저장소 (Firebase Realtime Database 래퍼) ----------------
+   기존 window.storage 버전과 함수 이름/시그니처를 동일하게 유지해서,
+   나머지 코드(도메인 로직, 화면 렌더링)는 전혀 손대지 않아도 되게 했습니다.
+*/
+async function getJSON(path, fallback){
+  if(!db) return fallback;
+  try{
+    const snap = await db.ref(path).once('value');
+    const val = snap.val();
+    return (val === null || val === undefined) ? fallback : val;
+  }catch(e){ console.error('firebase get failed', path, e); return fallback; }
+}
+// Firebase는 값 어딘가에 undefined가 섞여 있으면 set() 자체가 예외를 던집니다.
+// JSON.parse(JSON.stringify(...))로 정리하면 간단하지만, 순환 참조나 과도하게
+// 깊은 구조에서 "maximum call stack size exceeded"가 날 수 있어(실제로 발생),
+// 방문한 객체를 기억해 순환을 안전하게 끊는 수동 정리 함수로 교체했습니다.
+function stripUndefinedSafe(value, seen){
+  seen = seen || new WeakSet();
+  if(Array.isArray(value)){
+    if(seen.has(value)) return [];
+    seen.add(value);
+    return value.map(v => stripUndefinedSafe(v, seen)).filter(v => v !== undefined);
+  }
+  if(value !== null && typeof value === 'object'){
+    if(seen.has(value)) return {};
+    seen.add(value);
+    const out = {};
+    for(const k in value){
+      const v = stripUndefinedSafe(value[k], seen);
+      if(v !== undefined) out[k] = v;
+    }
+    return out;
+  }
+  return value === undefined ? undefined : value;
+}
+
+async function setJSON(path, value){
+  if(!db) return false;
+  try{
+    const safeValue = stripUndefinedSafe(value);
+    await db.ref(path).set(safeValue);
+    return true;
+  }catch(e){ console.error('firebase set failed', path, e); return false; }
+}
+async function listChildren(path){
+  if(!db) return {};
+  try{
+    const snap = await db.ref(path).once('value');
+    const val = snap.val();
+    return val || {};
+  }catch(e){ return {}; }
+}
+
+const sessionKey = c => `sessions/${c}/meta`;
+// 참여자/자기선택: 참여자별로 별도 경로 (본인만 쓰는 경로라 동시 제출해도 서로 안 부딪힘)
+const participantKey = (c,pid) => `sessions/${c}/participants/${pid}`;
+const selfKey = (c,pid) => `sessions/${c}/self/${pid}`;
+// 타인선택: 평가자별로 하나의 경로에 "그 사람이 평가한 모든 대상"을 모아 저장
+// (읽고-고쳐서-쓰기지만, 같은 평가자 본인만 이 경로를 건드리므로 다른 사람과 충돌 없음)
+const peerByKey = (c,selectorId) => `sessions/${c}/peerby/${selectorId}`;
+const resultsKey = c => `sessions/${c}/results`;
+const reportKey = c => `sessions/${c}/report`;
+
+async function listParticipants(code){
+  const obj = await listChildren(`sessions/${code}/participants`);
+  return Object.values(obj).sort((a,b)=> a.joinedAt - b.joinedAt);
+}
+async function listAllSelfSelections(code){
+  const obj = await listChildren(`sessions/${code}/self`);
+  return Object.entries(obj).map(([participantId, ids]) => ({ participantId, ids }));
+}
+async function listAllPeerSelections(code){
+  const obj = await listChildren(`sessions/${code}/peerby`);
+  const out = [];
+  for(const selectorId in obj){
+    const map = obj[selectorId] || {};
+    for(const targetId in map){
+      out.push({ selectorId, targetId, ids: map[targetId] });
+    }
+  }
+  return out;
+}
+
+/* ---------------- 도메인 로직 ---------------- */
+function computeJohari(selfIds, peerIds, allIds){
+  const selfSet = new Set(selfIds), peerSet = new Set(peerIds);
+  const open=[], hidden=[], blind=[], unknown=[];
+  for(const id of allIds){
+    const inSelf = selfSet.has(id), inPeer = peerSet.has(id);
+    if(inSelf && inPeer) open.push(id);
+    else if(inSelf) hidden.push(id);
+    else if(inPeer) blind.push(id);
+    else unknown.push(id);
+  }
+  const total = allIds.length || 1;
+  const pct = n => Math.round((n/total)*10000)/100;
+  return { openIds:open, hiddenIds:hidden, blindIds:blind, unknownIds:unknown,
+    openPct:pct(open.length), hiddenPct:pct(hidden.length), blindPct:pct(blind.length), unknownPct:pct(unknown.length) };
+}
+
+async function createSession(name, displayMode){
+  if(!db) throw new Error('Firebase 설정이 완료되지 않았습니다. HTML 파일 상단 안내대로 firebaseConfig를 채워 주세요.');
+  let code = null;
+  for(let i=0;i<20;i++){
+    const c = genCode();
+    const existing = await getJSON(sessionKey(c), null);
+    if(!existing){ code = c; break; }
+  }
+  if(!code) throw new Error('세션 코드를 생성하지 못했습니다. 다시 시도해 주세요.');
+  const session = { code, name, displayMode, status:'waiting', createdAt:Date.now(), startedAt:null, closedAt:null };
+  await setJSON(sessionKey(code), session);
+  return session;
+}
+
+async function joinSession(code, nickname){
+  if(!db) throw new Error('Firebase 설정이 완료되지 않았습니다. 코치에게 문의해 주세요.');
+  const session = await getJSON(sessionKey(code), null);
+  if(!session) throw new Error('세션을 찾을 수 없습니다. 코드를 다시 확인해 주세요.');
+  const participant = { id:`${Date.now()}-${Math.random().toString(36).slice(2,7)}`, nickname, joinedAt:Date.now() };
+  await setJSON(participantKey(code, participant.id), participant);
+  return participant;
+}
+
+async function setSessionStatus(code, status){
+  const session = await getJSON(sessionKey(code), null);
+  if(!session) throw new Error('세션을 찾을 수 없습니다.');
+  session.status = status;
+  if(status==='self_selecting' && !session.startedAt) session.startedAt = Date.now();
+  await setJSON(sessionKey(code), session);
+  return session;
+}
+
+// 같은 키에 대한 읽고-고쳐서-쓰기가 겹치지 않도록 키별로 순서를 강제합니다.
+// (다른 참여자는 서로 다른 키를 쓰므로 원래 안전하지만, 같은 사람이 네트워크
+// 지연 등으로 거의 동시에 두 번 제출하는 경우까지 대비한 이중 안전장치)
+const keyLocks = new Map();
+function withKeyLock(key, fn){
+  const prev = keyLocks.get(key) || Promise.resolve();
+  const next = prev.then(fn, fn);
+  keyLocks.set(key, next.catch(()=>{}));
+  return next;
+}
+
+async function saveSelfSelection(code, participantId, ids){
+  await setJSON(selfKey(code, participantId), ids);
+}
+async function getSelfSelection(code, participantId){
+  return await getJSON(selfKey(code, participantId), []);
+}
+async function savePeerSelection(code, selectorId, targetId, ids){
+  const key = peerByKey(code, selectorId);
+  return withKeyLock(key, async ()=>{
+    const map = await getJSON(key, {});
+    map[targetId] = ids;
+    await setJSON(key, map);
+  });
+}
+async function getPeerSelection(code, selectorId, targetId){
+  const map = await getJSON(peerByKey(code, selectorId), {});
+  return map[targetId] || [];
+}
+
+async function getProgress(code){
+  const participants = await listParticipants(code);
+  const selfEntries = await listAllSelfSelections(code);
+  const peerEntries = await listAllPeerSelections(code);
+  const total = participants.length;
+  const selfDoneSet = new Set(selfEntries.filter(e=>e.ids.length===5).map(e=>e.participantId));
+  const selfDone = participants.filter(p=>selfDoneSet.has(p.id)).length;
+  const expectedPeer = Math.max(total-1,0);
+  let peerDone = 0;
+  if(expectedPeer>0){
+    const countBySelector = {};
+    peerEntries.forEach(e=>{ if(e.ids.length===5) countBySelector[e.selectorId]=(countBySelector[e.selectorId]||0)+1; });
+    peerDone = Object.values(countBySelector).filter(n=>n>=expectedPeer).length;
+  }
+  return { participants, total,
+    selfRate: total ? Math.round(selfDone/total*100) : 0,
+    peerRate: total ? Math.round(peerDone/total*100) : 0 };
+}
+
+async function closeSessionAndCompute(code){
+  const [session, participants, selfEntries, peerEntries] = await Promise.all([
+    getJSON(sessionKey(code), null),
+    listParticipants(code),
+    listAllSelfSelections(code),
+    listAllPeerSelections(code),
+  ]);
+
+  const selfByParticipant = {};
+  selfEntries.forEach(e=>{ selfByParticipant[e.participantId] = e.ids; });
+
+  const receivedByParticipant = {};
+  const totalCount = {};
+  peerEntries.forEach(e=>{
+    if(!receivedByParticipant[e.targetId]) receivedByParticipant[e.targetId] = new Set();
+    e.ids.forEach(id => { receivedByParticipant[e.targetId].add(id); totalCount[id] = (totalCount[id]||0)+1; });
+  });
+  for(const pid in selfByParticipant){
+    selfByParticipant[pid].forEach(id => { totalCount[id] = (totalCount[id]||0)+1; });
+  }
+
+  const results = {};
+  for(const p of participants){
+    const selfIds = selfByParticipant[p.id] || [];
+    const peerIds = Array.from(receivedByParticipant[p.id] || []);
+    results[p.id] = computeJohari(selfIds, peerIds, ALL_IDS);
+  }
+
+  const topAdjectives = Object.entries(totalCount).sort((a,b)=>b[1]-a[1]).slice(0,10)
+    .map(([id,count])=>({ adjectiveId:Number(id), count }));
+  const majority = Math.ceil((participants.length||1)/2);
+  const commonStrengths = Object.entries(totalCount).filter(([,c])=>c>=majority)
+    .map(([id,count])=>({ adjectiveId:Number(id), count }));
+
+  const [resultsSaved, reportSaved] = await Promise.all([
+    setJSON(resultsKey(code), results),
+    setJSON(reportKey(code), { topAdjectives, commonStrengths }),
+  ]);
+  if(!resultsSaved || !reportSaved){
+    throw new Error('결과 저장에 실패했습니다. 네트워크 상태를 확인하고 다시 시도해 주세요.');
+  }
+
+  session.status = 'closed';
+  session.closedAt = Date.now();
+  const sessionSaved = await setJSON(sessionKey(code), session);
+  if(!sessionSaved){
+    throw new Error('세션 상태 저장에 실패했습니다. 결과는 저장됐으니 잠시 후 다시 시도해 주세요.');
+  }
+}
+
+/* ---------------- 형용사 그리드 컴포넌트 ---------------- */
+function mountAdjectiveGrid(root, getSelected, onToggle, onCountChange){
+  const searchEl = root.querySelector('.adj-search');
+  const gridEl = root.querySelector('.adj-grid');
+  let query = '';
+
+  function draw(){
+    const q = query.trim().toLowerCase();
+    const filtered = ADJECTIVES.filter(a => !q || a.ko.includes(q) || a.en.toLowerCase().includes(q));
+    const selected = getSelected();
+    const isFull = selected.length >= 5;
+    gridEl.innerHTML = filtered.length ? filtered.map(a=>{
+      const sel = selected.includes(a.id);
+      const disabled = !sel && isFull;
+      return `<button type="button" class="adj-chip ${sel?'selected':''} ${disabled?'disabled':''}" data-id="${a.id}">${esc(a.ko)}</button>`;
+    }).join('') : '<p class="empty-note">검색 결과가 없습니다.</p>';
+  }
+
+  searchEl.addEventListener('input', e => { query = e.target.value; draw(); });
+  gridEl.addEventListener('click', e => {
+    const btn = e.target.closest('.adj-chip');
+    if(!btn || btn.classList.contains('disabled')) return;
+    onToggle(Number(btn.dataset.id));
+    draw();
+    onCountChange(getSelected().length);
+  });
+
+  draw();
+}
+
+/* ---------------- 전역 오류 안전장치 ---------------- */
+function showFatalError(err){
+  console.error('Johari Live error:', err);
+  const msg = (err && err.message) ? err.message : String(err);
+  app.innerHTML = `
+    <main class="center-msg">
+      <p style="color:var(--danger);font-weight:700;font-size:16px;">문제가 발생했습니다</p>
+      <p style="font-size:12px;color:var(--muted);max-width:320px;word-break:break-word;font-family:monospace;">${esc(msg)}</p>
+      <button class="btn btn-secondary" id="b-recover" style="width:auto;padding:10px 22px;">처음으로</button>
+    </main>`;
+  const btn = document.getElementById('b-recover');
+  if(btn) btn.onclick = ()=>{ navStack = []; state = { screen:'home' }; render(); };
+}
+window.addEventListener('error', (e)=>{ showFatalError(e.error || e.message); });
+window.addEventListener('unhandledrejection', (e)=>{ showFatalError(e.reason); });
+
+/* ---------------- 화면 렌더링 ---------------- */
+function render(){
+  try{
+    stopPolling();
+    if(state.screen==='home') return renderHome();
+    if(state.screen==='coach-setup') return renderCoachSetup();
+    if(state.screen==='coach-board') return renderCoachBoard();
+    if(state.screen==='coach-report') return renderCoachReport();
+    if(state.screen==='join') return renderJoin();
+    if(state.screen==='wait') return renderWait();
+    if(state.screen==='self') return renderSelf();
+    if(state.screen==='peer-index') return renderPeerIndex();
+    if(state.screen==='peer-select') return renderPeerSelect();
+    if(state.screen==='result') return renderResult();
+  }catch(err){ showFatalError(err); }
+}
+
+function renderHome(){
+  app.innerHTML = `
+    <div class="wrap"><div class="card">
+      <div class="brand">Johari Live · Standalone v1.1</div>
+      <h1 class="title">실시간으로 함께 만드는<br>나와 우리의 조하리 창</h1>
+      <p class="desc">코치가 형용사 선택을 진행하면 참여자들이 각자의 스마트폰으로 참여하고,<br>Open·Hidden·Blind·Unknown 4개 영역이 실시간으로 그려집니다.</p>
+      ${!FIREBASE_CONFIGURED ? `
+        <div style="background:#FBF0EF;border:1.5px solid var(--danger);border-radius:12px;padding:14px;margin-bottom:20px;text-align:left;">
+          <p style="color:var(--danger);font-weight:700;font-size:13px;margin:0 0 4px;">⚠ Firebase 설정이 필요합니다</p>
+          <p style="font-size:12px;color:var(--ink);line-height:1.6;margin:0;">
+            파일 상단 &lt;script&gt; 안의 <code>firebaseConfig</code>가 아직 자리표시자입니다.
+            HTML 파일 맨 위 주석에 있는 설정 방법대로 본인의 Firebase 프로젝트 값으로
+            교체한 뒤 Netlify에 업로드해 주세요. 지금 상태로는 세션 생성/입장이 동작하지 않습니다.
+          </p>
+        </div>` : (!FIREBASE_SDK_LOADED ? `
+        <div style="background:#FBF0EF;border:1.5px solid var(--danger);border-radius:12px;padding:14px;margin-bottom:20px;text-align:left;">
+          <p style="color:var(--danger);font-weight:700;font-size:13px;margin:0 0 4px;">⚠ Firebase 스크립트를 불러오지 못했습니다</p>
+          <p style="font-size:12px;color:var(--ink);line-height:1.6;margin:0;">
+            설정값은 채워져 있지만 Firebase SDK 자체가 로드되지 않았습니다. 네트워크 연결이나
+            방화벽/광고 차단 확장 프로그램을 확인해 주세요. Netlify에 실제 배포한 뒤 열면
+            보통 정상적으로 로드됩니다.
+          </p>
+        </div>` : '')}
+      <div class="stack">
+        <button class="btn btn-primary" id="b-coach">코치로 시작하기</button>
+        <button class="btn btn-secondary" id="b-join">참여자로 참여하기</button>
+      </div>
+      <p class="fineprint">Firebase Realtime Database로 실시간 동기화됩니다. 새로고침하면 내 참여자 정보가 초기화되니, 세션 코드를 메모해 두고 같은 닉네임으로 다시 입장해 주세요.</p>
+    </div></div>`;
+  document.getElementById('b-coach').onclick = ()=> goto({ screen:'coach-setup', error:'' });
+  document.getElementById('b-join').onclick = ()=> goto({ screen:'join', error:'', prefillCode:null });
+}
+
+function renderCoachSetup(){
+  app.innerHTML = `
+    ${backBar()}
+    <div class="wrap" style="padding-top:0;"><div class="form-card">
+      <h2>세션 생성</h2>
+      <p class="sub">코치 로그인 없이 바로 세션을 만들 수 있습니다.</p>
+      <label>세션 이름</label>
+      <input type="text" id="s-name" placeholder="예: 3분기 팀빌딩 워크숍">
+      <label>참여자 표시 방식</label>
+      <div class="radio-row">
+        <label><input type="radio" name="dm" value="anonymous" checked> 익명</label>
+        <label><input type="radio" name="dm" value="real_name"> 실명</label>
+      </div>
+      <div class="stack" style="margin-top:18px;"><button class="btn btn-primary" id="b-create">세션 만들기</button></div>
+      <label style="margin-top:22px;">기존 세션 코드로 이어서 진행</label>
+      <input type="text" id="s-rejoin" class="code-input" maxlength="4" placeholder="0000">
+      <div class="stack" style="margin-top:10px;"><button class="btn btn-secondary" id="b-rejoin">이 코드로 열기</button></div>
+      ${state.error?`<div class="error-text">${esc(state.error)}</div>`:''}
+    </div></div>`;
+  bindBackBar();
+  document.getElementById('b-create').onclick = async ()=>{
+    const name = document.getElementById('s-name').value.trim();
+    if(!name){ state.error='세션 이름을 입력해 주세요.'; return render(); }
+    const dm = document.querySelector('input[name=dm]:checked').value;
+    try{
+      const session = await createSession(name, dm);
+      goto({ code: session.code, session, error:'', screen:'coach-board' });
+    }catch(e){ state.error = e.message; render(); }
+  };
+  document.getElementById('b-rejoin').onclick = async ()=>{
+    const code = document.getElementById('s-rejoin').value.trim();
+    if(!/^\d{4}$/.test(code)){ state.error='4자리 숫자 코드를 입력해 주세요.'; return render(); }
+    const session = await getJSON(sessionKey(code), null);
+    if(!session){ state.error='해당 코드의 세션을 찾을 수 없습니다.'; return render(); }
+    goto({ code, session, error:'', screen: session.status==='closed' ? 'coach-report' : 'coach-board' });
+  };
+}
+
+const STATUS_LABEL = { waiting:'대기중', self_selecting:'자기 선택중', peer_selecting:'타인 선택중', closed:'종료됨' };
+const NEXT_STATUS = { waiting:'self_selecting', self_selecting:'peer_selecting', peer_selecting:'closed', closed:null };
+const NEXT_LABEL = { waiting:'자기 선택 시작', self_selecting:'타인 선택 시작', peer_selecting:'세션 종료하고 결과 보기' };
+
+async function renderCoachBoard(){
+  stopPolling(); // 재호출(폴링) 경로로 진입해도 이전 타이머가 반드시 정리되도록 방어
+  const code = state.code;
+  const [session, progress] = await Promise.all([getJSON(sessionKey(code), null), getProgress(code)]);
+  if(state.screen!=='coach-board') return; // await 도중 화면이 바뀌었으면 렌더링하지 않음
+  if(!session){ app.innerHTML = `${backBar()}<main class="center-msg"><p>세션을 찾을 수 없습니다.</p></main>`; bindBackBar(); return; }
+  state.session = session;
+  const status = session.status;
+  const joinUrl = `${window.location.origin}${window.location.pathname}?code=${code}`;
+
+  app.innerHTML = `
+    <div class="topbar"><div class="topbar-row">
+      <button class="link" id="btn-back">← 뒤로</button>
+      <div><div class="muted-white">세션 코드</div><div class="code-badge">${esc(code)}</div></div>
+      <div class="qr-wrap"><div id="qr-code"></div><div class="qr-caption">카메라로 스캔하면<br>바로 참여할 수 있어요</div></div>
+      <button class="link-btn" id="btn-share-link">🔗 링크 생성</button>
+      <div class="muted-white">진행 상태: ${STATUS_LABEL[status]}</div>
+      <button class="link" id="exit">세션 나가기</button>
+    </div></div>
+    <div class="content">
+      <div class="panel">
+        <p style="font-size:13px;color:var(--muted);margin:0 0 4px;">참여자 ${progress.total}명 입장</p>
+        <div class="chip-list">${progress.participants.map(p=>`<span class="pchip">${esc(p.nickname)}</span>`).join('') || '<span style="font-size:12px;color:var(--muted);">아직 없음</span>'}</div>
+      </div>
+      ${status!=='waiting' ? `
+      <div class="panel">
+        <div class="progress-label"><span>자기 선택 완료율</span><span>${progress.selfRate}%</span></div>
+        <div class="progress-track"><div class="progress-fill" style="width:${progress.selfRate}%"></div></div>
+        ${(status==='peer_selecting'||status==='closed') ? `
+        <div class="progress-label"><span>타인 선택 완료율</span><span>${progress.peerRate}%</span></div>
+        <div class="progress-track"><div class="progress-fill" style="width:${progress.peerRate}%"></div></div>` : ''}
+      </div>` : ''}
+      ${NEXT_STATUS[status] ? `<button class="btn btn-gold" id="b-next" style="width:100%;padding:15px;" ${progress.total===0?'disabled':''}>${NEXT_LABEL[status]}</button>` : ''}
+      ${progress.total===0 && status==='waiting' ? `<p style="text-align:center;font-size:12px;color:var(--muted);margin-top:8px;">참여자가 입장하면 시작할 수 있습니다.</p>` : ''}
+    </div>
+    ${state.showLinkPopup ? `
+    <div class="modal-overlay" id="link-modal">
+      <div class="modal-card">
+        <button class="modal-close" id="link-close-x">✕</button>
+        <h3 style="margin:0 0 4px;color:var(--navy);font-size:16px;">참여 링크</h3>
+        <p style="font-size:12px;color:var(--muted);margin:0;">이 링크를 열면 코드 입력 없이 바로 참여할 수 있어요.</p>
+        <div class="link-box">
+          <input type="text" id="share-link-input" readonly value="${esc(joinUrl)}">
+          <button class="btn btn-gold" id="btn-copy-link" style="width:auto;padding:0 16px;">복사</button>
+        </div>
+        <p id="copy-feedback" style="font-size:11.5px;color:var(--open);margin:8px 0 0;height:14px;"></p>
+      </div>
+    </div>` : ''}`;
+
+  document.getElementById('btn-back').onclick = goBack;
+  document.getElementById('exit').onclick = ()=> goto({ screen:'home', code:null, session:null, showLinkPopup:false });
+  document.getElementById('btn-share-link').onclick = ()=>{ state.showLinkPopup = true; render(); };
+  const nextBtn = document.getElementById('b-next');
+  if(nextBtn) nextBtn.onclick = async ()=>{
+    const next = NEXT_STATUS[status];
+    nextBtn.disabled = true; nextBtn.textContent='처리 중…';
+    stopPolling(); // 처리 중 폴링이 화면을 다시 그려 버튼이 재활성화되는 것을 방지 (중복 클릭 경합 방지)
+    try{
+      if(next==='closed'){ await closeSessionAndCompute(code); goto({ screen:'coach-report' }); return; }
+      await setSessionStatus(code, next);
+      render(); // 같은 화면 안에서 상태만 갱신 (히스토리 스택에 새로 안 쌓음)
+    }catch(e){
+      console.error('세션 진행 중 오류:', e.name, e.message, e.stack);
+      alert(`처리 중 문제가 발생했습니다: ${e.message || e}\n\n다시 시도해 주세요. 계속 반복되면 인터넷 연결과 Firebase 설정을 확인해 주세요.`);
+      render();
+    }
+  };
+
+  if(state.showLinkPopup){
+    const overlay = document.getElementById('link-modal');
+    overlay.onclick = (e)=>{ if(e.target===overlay){ state.showLinkPopup=false; render(); } };
+    document.getElementById('link-close-x').onclick = ()=>{ state.showLinkPopup=false; render(); };
+    const input = document.getElementById('share-link-input');
+    document.getElementById('btn-copy-link').onclick = async ()=>{
+      const feedback = document.getElementById('copy-feedback');
+      try{
+        if(navigator.clipboard && navigator.clipboard.writeText){
+          await navigator.clipboard.writeText(joinUrl);
+        } else {
+          input.select(); input.setSelectionRange(0, 99999); document.execCommand('copy');
+        }
+        feedback.textContent = '복사되었습니다 ✓';
+      }catch(e){
+        input.select(); input.setSelectionRange(0, 99999);
+        feedback.textContent = '자동 복사가 안 되면 직접 선택해서 복사해 주세요.';
+      }
+    };
+  }
+
+  const qrEl = document.getElementById('qr-code');
+  qrEl.innerHTML = ''; // 재렌더링 시 QR이 중첩되지 않도록 항상 비우고 새로 생성
+  try{
+    new QRCode(qrEl, { text: joinUrl, width:76, height:76, colorDark:'#1C2541', colorLight:'#ffffff' });
+  }catch(e){ console.error('QR 생성 실패', e); }
+
+  // 폴링: render()를 거치므로 stopPolling()이 항상 먼저 실행되어 타이머가 누적되지 않음
+  // 대규모 그룹에서는 매 폴링마다 참여자 수만큼 조회가 늘어나므로 3초로 완화
+  pollTimer = setInterval(()=>{
+    if(state.screen!=='coach-board') return stopPolling();
+    render();
+  }, 3000);
+}
+
+async function renderCoachReport(){
+  const code = state.code;
+  const [report, results, participants] = await Promise.all([
+    getJSON(reportKey(code), null),
+    getJSON(resultsKey(code), {}),
+    listParticipants(code),
+  ]);
+  if(state.screen!=='coach-report') return;
+  if(!report){ app.innerHTML = `${backBar()}<main class="center-msg"><p>아직 리포트가 생성되지 않았습니다. 세션을 종료해 주세요.</p></main>`; bindBackBar(); return; }
+
+  app.innerHTML = `
+    ${backBar()}
+    <div class="content" style="max-width:560px;padding-top:6px;">
+      <h1 style="font-size:23px;color:var(--navy);margin-bottom:2px;">세션 결과 요약</h1>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:20px;">세션 코드 ${esc(code)}</p>
+      <div class="panel">
+        <h2 style="font-size:15px;color:var(--navy);margin:0 0 10px;">참여자별 결과 (눌러서 그래프 보기)</h2>
+        ${participants.map(p=>`
+          <button type="button" class="cat-btn" data-pid="${esc(p.id)}">
+            <span>${esc(p.nickname)}</span>
+            <span class="cat-count">${results[p.id] ? `Open ${results[p.id].openPct}%` : '결과 없음'}</span>
+          </button>`).join('') || '<p style="font-size:12px;color:var(--muted);">참여자가 없습니다.</p>'}
+      </div>
+      <div class="panel">
+        <h2 style="font-size:15px;color:var(--navy);margin:0 0 10px;">전체 Top 10 형용사</h2>
+        ${(report.topAdjectives||[]).map((t,i)=>`<div style="display:flex;justify-content:space-between;font-size:13.5px;padding:7px 0;border-bottom:1px solid var(--line);">
+          <span>${i+1}. ${esc(ADJ_BY_ID[t.adjectiveId]?.ko||'')}</span><span style="color:var(--muted);">${t.count}회</span></div>`).join('') || '<p style="font-size:12px;color:var(--muted);">선택된 형용사가 없습니다.</p>'}
+      </div>
+      <div class="panel">
+        <h2 style="font-size:15px;color:var(--navy);margin:0 0 4px;">팀 공통 강점</h2>
+        <p style="font-size:11.5px;color:var(--muted);margin:0 0 10px;">참여자 과반수 이상에게 언급된 형용사</p>
+        <div class="chip-list">
+          ${(report.commonStrengths||[]).map(c=>`<span class="pchip" style="border-left:3px solid var(--open);">${esc(ADJ_BY_ID[c.adjectiveId]?.ko||'')} · ${c.count}명</span>`).join('') || '<span style="font-size:12px;color:var(--muted);">과반수 이상 공통 형용사가 없습니다.</span>'}
+        </div>
+      </div>
+      <button class="btn btn-secondary" id="b-home">처음으로</button>
+    </div>
+    ${state.reportDetailId ? renderParticipantDetailModal(participants, results) : ''}
+  `;
+  bindBackBar();
+  document.getElementById('b-home').onclick = ()=> goto({ screen:'home', code:null, session:null, reportDetailId:null });
+  document.querySelectorAll('[data-pid]').forEach(btn=>{
+    btn.onclick = ()=>{ state.reportDetailId = btn.dataset.pid; render(); };
+  });
+  if(state.reportDetailId) bindParticipantDetailModal();
+}
+
+function renderParticipantDetailModal(participants, results){
+  const p = participants.find(x=>x.id===state.reportDetailId);
+  const result = results[state.reportDetailId];
+  if(!p || !result) return '';
+  return `
+    <div class="modal-overlay" id="detail-modal">
+      <div class="modal-card">
+        <button class="modal-close" id="detail-close-x">✕</button>
+        <h3 style="margin:0 0 10px;color:var(--navy);font-size:16px;">${esc(p.nickname)}님</h3>
+        <div class="quad-grid">
+          ${QUADRANTS.map(q=>{
+            const ids = result[q.key+'Ids'] || [];
+            const words = ids.length
+              ? ids.map(id=>wordChip(id, q.origin)).join('')
+              : '<span style="font-size:11.5px;color:var(--muted);">해당 없음</span>';
+            return `<div class="quad-cell ${q.cls}">
+              <div class="quad-head"><span class="quad-title">${q.label}</span><span class="quad-pct">${result[q.key+'Pct']}%</span></div>
+              <div class="quad-desc">${q.desc}</div>
+              <div class="quad-words">${words}</div>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>
+    </div>`;
+}
+function bindParticipantDetailModal(){
+  const overlay = document.getElementById('detail-modal');
+  if(!overlay) return;
+  overlay.onclick = (e)=>{ if(e.target===overlay){ state.reportDetailId=null; render(); } };
+  document.getElementById('detail-close-x').onclick = ()=>{ state.reportDetailId=null; render(); };
+}
+
+function renderJoin(){
+  const prefilled = !!state.prefillCode;
+  app.innerHTML = `
+    ${backBar()}
+    <div class="wrap" style="padding-top:0;"><div class="form-card">
+      <h2>세션 참여</h2>
+      <p class="sub">${prefilled?'QR 스캔으로 코드가 자동 입력됐어요.':'코치에게 받은 4자리 코드를 입력해 주세요.'}</p>
+      ${prefilled ? `<div class="prefill-badge">${esc(state.prefillCode)}</div><input type="hidden" id="j-code" value="${esc(state.prefillCode)}">`
+        : `<label>세션 코드</label><input type="text" id="j-code" class="code-input" maxlength="4" placeholder="0000">`}
+      <label>닉네임</label>
+      <input type="text" id="j-nick" maxlength="12" placeholder="예: 민호">
+      <div class="stack" style="margin-top:18px;"><button class="btn btn-primary" id="b-join">입장하기</button></div>
+      ${state.error?`<div class="error-text">${esc(state.error)}</div>`:''}
+    </div></div>`;
+  bindBackBar();
+  if(prefilled) setTimeout(()=>document.getElementById('j-nick')?.focus(), 0);
+  document.getElementById('b-join').onclick = async ()=>{
+    const code = document.getElementById('j-code').value.trim();
+    const nick = document.getElementById('j-nick').value.trim();
+    if(!/^\d{4}$/.test(code)){ state.error='4자리 숫자 코드를 입력해 주세요.'; return render(); }
+    if(!nick){ state.error='닉네임을 입력해 주세요.'; return render(); }
+    try{
+      const participant = await joinSession(code, nick);
+      goto({ code, participantId: participant.id, nickname: nick, error:'', screen:'wait' });
+    }catch(e){ state.error = e.message; render(); }
+  };
+}
+
+function renderWait(){
+  if(!state.participantId){ return redirectTo({ screen:'join', prefillCode: state.code }); }
+  app.innerHTML = `
+    ${backBar()}
+    <main class="center-msg">
+      <p style="font-size:13px;color:var(--muted);">코드 ${esc(state.code)} · ${esc(state.nickname)}님</p>
+      <div style="font-size:44px;">⏳</div>
+      <p style="color:var(--navy);font-weight:600;font-size:17px;">코치가 시작하기를 기다리는 중입니다</p>
+      <p id="wait-count" style="font-size:13px;color:var(--muted);">확인 중…</p>
+    </main>`;
+  bindBackBar();
+  const check = async ()=>{
+    if(state.screen!=='wait') return stopPolling();
+    const session = await getJSON(sessionKey(state.code), null);
+    if(!session) return;
+    if(session.status!=='waiting'){ redirectTo({ screen:'self' }); return; }
+    const participants = await listParticipants(state.code);
+    const el = document.getElementById('wait-count');
+    if(el) el.textContent = `현재 ${participants.length}명 입장`;
+  };
+  check();
+  pollTimer = setInterval(check, 2000);
+}
+
+async function renderSelf(){
+  if(!state.participantId){ return redirectTo({ screen:'join', prefillCode: state.code }); }
+  const [session, selfIds] = await Promise.all([
+    getJSON(sessionKey(state.code), null),
+    getSelfSelection(state.code, state.participantId),
+  ]);
+  if(state.screen!=='self') return;
+  if(!session){ app.innerHTML = `${backBar()}<main class="center-msg"><p>세션을 찾을 수 없습니다.</p></main>`; bindBackBar(); return; }
+  const status = session.status;
+
+  if(status==='waiting'){
+    app.innerHTML = `${backBar()}<main class="center-msg"><p style="color:var(--navy);font-weight:600;">코치가 시작하기를 기다리는 중입니다</p></main>`;
+    bindBackBar();
+    return;
+  }
+  if(status==='peer_selecting'){
+    app.innerHTML = `${backBar()}<main class="center-msg">
+      <p style="color:var(--navy);font-weight:600;">자기 선택 단계가 마감됐습니다</p>
+      <button class="btn btn-primary" id="b-go-peer" style="width:auto;padding:12px 26px;">타인 선택으로 이동</button>
+    </main>`;
+    bindBackBar();
+    document.getElementById('b-go-peer').onclick = ()=> goto({ screen:'peer-index' });
+    return;
+  }
+  if(status==='closed'){ return redirectTo({ screen:'result' }); }
+
+  let selected = [...selfIds];
+  app.innerHTML = `
+    ${backBar()}
+    <div class="content" style="max-width:640px;padding-top:6px;">
+      <div class="banner">
+        <div class="tag">자기 선택</div>
+        <div class="main">나를 표현하는 단어 5개를 골라주세요</div>
+        <div class="sub" id="counter">선택 ${selected.length}/5</div>
+      </div>
+      <div id="grid-root"><input type="text" class="adj-search" placeholder="검색 (한글 또는 영문)"><div class="adj-grid"></div></div>
+      <button class="btn btn-primary" id="b-next" style="width:100%;margin-top:18px;" ${selected.length!==5?'disabled':''}>다음</button>
+    </div>`;
+  bindBackBar();
+
+  mountAdjectiveGrid(document.getElementById('grid-root'),
+    ()=>selected,
+    (id)=>{ selected = selected.includes(id) ? selected.filter(x=>x!==id) : (selected.length<5 ? [...selected, id] : selected); },
+    (count)=>{
+      document.getElementById('counter').textContent = `선택 ${count}/5`;
+      document.getElementById('b-next').disabled = count!==5;
+    });
+
+  document.getElementById('b-next').onclick = async ()=>{
+    if(selected.length!==5) return;
+    const btn = document.getElementById('b-next'); btn.disabled=true; btn.textContent='저장 중…';
+    await saveSelfSelection(state.code, state.participantId, selected);
+    goto({ screen:'peer-index' });
+  };
+}
+
+async function renderPeerIndex(){
+  if(!state.participantId){ return redirectTo({ screen:'join', prefillCode: state.code }); }
+  const session = await getJSON(sessionKey(state.code), null);
+  if(state.screen!=='peer-index') return;
+  if(!session){ app.innerHTML = `${backBar()}<main class="center-msg"><p>세션을 찾을 수 없습니다.</p></main>`; bindBackBar(); return; }
+  if(session.status==='closed'){ return redirectTo({ screen:'result' }); }
+  if(session.status==='waiting' || session.status==='self_selecting'){
+    app.innerHTML = `${backBar()}<main class="center-msg"><p style="color:var(--muted);">아직 타인 선택 단계가 시작되지 않았습니다.</p></main>`;
+    bindBackBar();
+    return;
+  }
+
+  const participants = await listParticipants(state.code);
+  const others = participants.filter(p=>p.id!==state.participantId);
+  const withStatus = await Promise.all(others.map(async (p)=>{
+    const ids = await getPeerSelection(state.code, state.participantId, p.id);
+    return { ...p, done: ids.length===5 };
+  }));
+  if(state.screen!=='peer-index') return;
+  const next = withStatus.find(p=>!p.done);
+  const doneCount = withStatus.filter(p=>p.done).length;
+
+  if(!next){
+    app.innerHTML = `${backBar()}<main class="center-msg">
+      <p style="color:var(--navy);font-weight:600;">모든 참여자에 대한 선택을 마쳤습니다.<br>코치가 세션을 종료하면 결과를 확인할 수 있어요.</p>
+    </main>`;
+    bindBackBar();
+    pollTimer = setInterval(async ()=>{
+      if(state.screen!=='peer-index') return stopPolling();
+      const s = await getJSON(sessionKey(state.code), null);
+      if(s && s.status==='closed'){ redirectTo({ screen:'result' }); }
+    }, 2000);
+    return;
+  }
+
+  app.innerHTML = `${backBar()}<main class="center-msg">
+    <p style="font-size:13px;color:var(--muted);">${doneCount}/${withStatus.length}명 완료</p>
+    <p style="color:var(--navy);font-weight:600;font-size:17px;">다음: ${esc(next.nickname)}님</p>
+    <button class="btn btn-primary" id="b-start" style="width:auto;padding:12px 26px;">시작하기</button>
+  </main>`;
+  bindBackBar();
+  document.getElementById('b-start').onclick = ()=> goto({ peerTargetId: next.id, screen:'peer-select' });
+}
+
+async function renderPeerSelect(){
+  const targetId = state.peerTargetId;
+  const [participants, existing] = await Promise.all([
+    listParticipants(state.code),
+    getPeerSelection(state.code, state.participantId, targetId),
+  ]);
+  if(state.screen!=='peer-select') return;
+  const target = participants.find(p=>p.id===targetId);
+  let selected = [...existing];
+
+  app.innerHTML = `
+    ${backBar()}
+    <div class="content" style="max-width:640px;padding-top:6px;">
+      <div class="banner">
+        <div class="tag">타인 선택</div>
+        <div class="main">${esc(target?.nickname||'참여자')}님을 표현하는 단어 5개</div>
+        <div class="sub" id="counter">선택 ${selected.length}/5</div>
+      </div>
+      <div id="grid-root"><input type="text" class="adj-search" placeholder="검색 (한글 또는 영문)"><div class="adj-grid"></div></div>
+      <button class="btn btn-primary" id="b-next" style="width:100%;margin-top:18px;" ${selected.length!==5?'disabled':''}>다음 사람</button>
+    </div>`;
+  bindBackBar();
+
+  mountAdjectiveGrid(document.getElementById('grid-root'),
+    ()=>selected,
+    (id)=>{ selected = selected.includes(id) ? selected.filter(x=>x!==id) : (selected.length<5 ? [...selected, id] : selected); },
+    (count)=>{
+      document.getElementById('counter').textContent = `선택 ${count}/5`;
+      document.getElementById('b-next').disabled = count!==5;
+    });
+
+  document.getElementById('b-next').onclick = async ()=>{
+    if(selected.length!==5) return;
+    const btn = document.getElementById('b-next'); btn.disabled=true; btn.textContent='저장 중…';
+    await savePeerSelection(state.code, state.participantId, targetId, selected);
+    goto({ screen:'peer-index' });
+  };
+}
+
+const QUADRANTS = [
+  { key:'open', label:'Open', desc:'나도 알고 남도 아는', cls:'quad-open', origin:'both' },
+  { key:'blind', label:'Blind', desc:'남만 아는', cls:'quad-blind', origin:'peer' },
+  { key:'hidden', label:'Hidden', desc:'나만 아는', cls:'quad-hidden', origin:'self' },
+  { key:'unknown', label:'Unknown', desc:'아무도 모르는', cls:'quad-unknown', origin:null },
+];
+
+function wordChip(id, origin){
+  // origin: 'self'(나=네이비) | 'peer'(타인=골드) | 'both'(둘 다=점 2개) | null(아무도 선택 안 함=점 없음)
+  const label = esc(ADJ_BY_ID[id]?.ko||'');
+  if(origin==='both'){
+    return `<span class="word-chip">${label}<span class="dot-group"><span class="dot" style="background:var(--navy)"></span><span class="dot" style="background:var(--gold)"></span></span></span>`;
+  }
+  if(origin==='self' || origin==='peer'){
+    const color = origin==='self' ? 'var(--navy)' : 'var(--gold)';
+    return `<span class="word-chip">${label}<span class="dot" style="background:${color}"></span></span>`;
+  }
+  return `<span class="word-chip" style="opacity:.7;">${label}</span>`;
+}
+
+async function renderResult(){
+  if(!state.participantId){ return redirectTo({ screen:'join', prefillCode: state.code }); }
+  const results = await getJSON(resultsKey(state.code), null);
+  if(state.screen!=='result') return;
+  const myResult = results ? results[state.participantId] : null;
+
+  if(!myResult){
+    app.innerHTML = `${backBar()}<main class="center-msg"><p style="color:var(--muted);font-size:13.5px;">결과가 아직 준비되지 않았습니다.<br>코치가 세션을 종료하면 자동으로 나타납니다.</p></main>`;
+    bindBackBar();
+    pollTimer = setInterval(()=>{ if(state.screen!=='result') return stopPolling(); render(); }, 2000);
+    return;
+  }
+
+  app.innerHTML = `
+    ${backBar()}
+    <div class="content" style="max-width:560px;padding-top:6px;">
+      <h1 style="font-size:22px;color:var(--navy);margin-bottom:2px;">나의 조하리 창</h1>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:14px;">${esc(state.nickname)}님</p>
+      <div class="legend">
+        <span class="legend-item"><span class="dot" style="background:var(--navy)"></span>나</span>
+        <span class="legend-item"><span class="dot" style="background:var(--gold)"></span>타인</span>
+        <span class="legend-item"><span class="dot-group"><span class="dot" style="background:var(--navy)"></span><span class="dot" style="background:var(--gold)"></span></span>둘 다</span>
+      </div>
+      <div class="quad-grid">
+        ${QUADRANTS.map(q=>{
+          const ids = myResult[q.key+'Ids'] || [];
+          const words = ids.length
+            ? ids.map(id=>wordChip(id, q.origin)).join('')
+            : '<span style="font-size:11.5px;color:var(--muted);">해당 없음</span>';
+          return `<div class="quad-cell ${q.cls}">
+            <div class="quad-head"><span class="quad-title">${q.label}</span><span class="quad-pct">${myResult[q.key+'Pct']}%</span></div>
+            <div class="quad-desc">${q.desc}</div>
+            <div class="quad-words">${words}</div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  bindBackBar();
+}
+
+/* ---------------- 초기 진입 ---------------- */
+(function init(){
+  const qc = getQueryCode();
+  if(qc){ state.screen='join'; state.prefillCode=qc; }
+  safeHistoryCall(()=> history.replaceState(null, ''));
+  render();
+})();
+
+/* ---------------- 모바일 백그라운드 복귀 시 즉시 재확인 ----------------
+   모바일 브라우저는 화면이 꺼지거나 다른 앱으로 전환되면 setInterval 폴링을
+   멈추거나 늦춥니다. 코치가 세션을 종료했는데도 참여자 화면이 "대기중" 상태로
+   멈춰 보이는 문제(데스크톱은 괜찮은데 모바일만 안 됨)의 주된 원인이라,
+   탭이 다시 보이거나 포커스를 받으면 최신 데이터를 다시 확인합니다.
+   단, 형용사 선택 중인 화면 등 입력 중인 상태를 되돌리면 안 되는 화면은 제외합니다.
+*/
+const PASSIVE_SCREENS = new Set(['wait','result','coach-board','coach-report','peer-index']);
+function refreshIfPassive(){ if(PASSIVE_SCREENS.has(state.screen)) render(); }
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') refreshIfPassive(); });
+window.addEventListener('focus', refreshIfPassive);
+window.addEventListener('pageshow', refreshIfPassive);
+
+</script>
+</body>
+</html>
